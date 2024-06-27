@@ -2,16 +2,16 @@ package main
 
 import (
 	"bytes"
-	"crypto/md5"
 	"crypto/sha1"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"strings"
 )
 
-func CASPathTransformFunc(key string) string {
+func CASPathTransformFunc(key string) PathKey {
 	hash := sha1.Sum([]byte(key))
 	hashStr := hex.EncodeToString(hash[:])
 
@@ -26,11 +26,19 @@ func CASPathTransformFunc(key string) string {
 	}
 
 	path := strings.Join(paths, "/")
-	return "tmp/" + path
+	return PathKey{
+		Pathname: "tmp/" + path,
+		Filename: hashStr,
+	}
 
 }
 
-type PathTransformFunc func(string) string
+type PathTransformFunc func(string) PathKey
+
+type PathKey struct {
+	Pathname string
+	Filename string
+}
 
 type StoreOpts struct {
 	PathTransformFunc PathTransformFunc
@@ -38,6 +46,10 @@ type StoreOpts struct {
 
 var DefaultPathTransformFunc = func(key string) string {
 	return key
+}
+
+func (p PathKey) FullPath() string {
+	return fmt.Sprintf("%s/%s", p.Pathname, p.Filename)
 }
 
 type Store struct {
@@ -50,32 +62,47 @@ func NewStore(opts StoreOpts) *Store {
 	}
 }
 
-func (s *Store) writeStream(key string, r io.Reader) error {
-	pathName := s.PathTransformFunc(key)
+func (s *Store) Read(key string) (io.Reader, error) {
+	f, err := s.readStream(key)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
 
-	if err := os.MkdirAll(pathName, os.ModePerm); err != nil {
+	buf := new(bytes.Buffer)
+	_, err = io.Copy(buf, f)
+	if err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
+func (s *Store) readStream(key string) (io.ReadCloser, error) {
+	pathKey := s.PathTransformFunc(key)
+
+	return os.Open(pathKey.FullPath())
+}
+
+func (s *Store) writeStream(key string, r io.Reader) error {
+	pathKey := s.PathTransformFunc(key)
+
+	if err := os.MkdirAll(pathKey.Pathname, os.ModePerm); err != nil {
 		return nil
 	}
 
-	buf := new(bytes.Buffer)
-	io.Copy(buf, r)
+	fullPath := pathKey.FullPath()
 
-	filenameBytes := md5.Sum(buf.Bytes())
-	filename := hex.EncodeToString(filenameBytes[:])
-
-	pathAndFilename := pathName + "/" + filename
-
-	f, err := os.Create(pathAndFilename)
+	f, err := os.Create(fullPath)
 	if err != nil {
 		return err
 	}
 
-	n, err := io.Copy(f, buf)
+	n, err := io.Copy(f, r)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("written (%d) bytes to disk: %s", n, pathAndFilename)
+	log.Printf("written (%d) bytes to disk: %s", n, fullPath)
 
 	return nil
 }
